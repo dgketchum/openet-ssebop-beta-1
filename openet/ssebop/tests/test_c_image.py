@@ -784,6 +784,32 @@ def test_Image_tcorr_gridded_method(tcorr_resample, tcorr_source, tmax_source,
     assert abs(tcorr['tcorr'] - expected) <= tol
 
 
+# CGM - Equivalent to tests above but with Collection 2 SR
+# @pytest.mark.parametrize(
+#     'tcorr_resample, tcorr_source, tmax_source, image_id, clip, xy, expected',
+#     [
+#         ['BILINEAR', 'GRIDDED', 'DAYMET_MEDIAN_V2',
+#          'LANDSAT/LC08/C02/T1_L2/LC08_044033_20170716',
+#          [600000, 4270000, 625000, 4285000], [612500, 4277500],
+#          0.9895701729950153],
+#     ]
+# )
+# def test_Image_tcorr_gridded_method(tcorr_resample, tcorr_source, tmax_source,
+#                                     image_id, clip, xy, expected, tol=0.000001):
+#     """Test that tcorr_resample with bilinear is different than with nearest"""
+#     image_crs = ee.Image(image_id).select([3]).projection().crs()
+#     clip_geom = ee.Geometry.Rectangle(clip, image_crs, False)
+#     point_xy = ee.Geometry.Point(xy, image_crs).transform('EPSG:4326', 1)\
+#         .coordinates().getInfo()
+#     tcorr_img = ssebop.Image.from_landsat_c2_sr(
+#         ee.Image(image_id).clip(clip_geom), tcorr_source=tcorr_source,
+#         tmax_source=tmax_source, tmax_resample='nearest',
+#         tcorr_resample=tcorr_resample).tcorr
+#     tcorr = utils.point_image_value(tcorr_img, point_xy)
+#     index = utils.getinfo(tcorr_img.get('tcorr_index'))
+#     assert abs(tcorr['tcorr'] - expected) <= tol
+
+
 @pytest.mark.parametrize('tcorr_source', ['GRIDDED', 'GRIDDED_COLD'])
 def test_Image_tcorr_gridded_resample_exception(tcorr_source):
     # """Test that an exception is raised for unsupported tcorr_resample values"""
@@ -896,6 +922,64 @@ def test_Image_tcorr_scene_daily():
     index = utils.getinfo(tcorr_img.get('tcorr_index'))
     assert tcorr['tcorr'] is None
     assert index == 9
+
+
+@pytest.mark.parametrize(
+    'tcorr_source, tmax_source, image_id, clip, xy, expected',
+    [
+        ['SCENE_GRIDDED', 'DAYMET_MEDIAN_V2',
+         'LANDSAT/LC08/C01/T1_TOA/LC08_044033_20170716',
+         [600000, 4270000, 625000, 4285000], [612500, 4277500],
+         [0.991009147396023, 1]],
+    ]
+)
+def test_Image_tcorr_scene_gridded_source(tcorr_source, tmax_source, image_id,
+                                          clip, xy, expected, tol=0.000001):
+    """"""
+    image_crs = ee.Image(image_id).select([3]).projection().crs()
+    clip_geom = ee.Geometry.Rectangle(clip, image_crs, False)
+    point_xy = ee.Geometry.Point(xy, image_crs).transform('EPSG:4326', 1)\
+        .coordinates().getInfo()
+    tcorr_img = ssebop.Image.from_landsat_c1_toa(
+        ee.Image(image_id).clip(clip_geom), tcorr_source=tcorr_source,
+        tmax_source=tmax_source, tmax_resample='nearest',
+        tcorr_resample='nearest').tcorr_gridded_cold
+    tcorr = utils.point_image_value(tcorr_img, point_xy)
+    index = utils.getinfo(tcorr_img.get('tcorr_index'))
+    assert abs(tcorr['tcorr'] - expected[0]) <= tol
+    assert index == expected[1]
+
+
+@pytest.mark.parametrize(
+    'tcorr_source, tmax_source, image_id, clip, xy, expected',
+    [
+        ['projects/usgs-ssebop/tcorr_gridded_v0p1p0/daymet_median_v2',
+         'DAYMET_MEDIAN_V2',
+         'LANDSAT/LC08/C01/T1_TOA/LC08_044033_20170716',
+         [600000, 4270000, 625000, 4285000], [612500, 4277500],
+         [0.991009147396023, 1]],
+    ]
+)
+def test_Image_tcorr_collection_id_source(tcorr_source, tmax_source, image_id,
+                                          clip, xy, expected, tol=0.000001):
+    """"""
+    image_crs = ee.Image(image_id).select([3]).projection().crs()
+    clip_geom = ee.Geometry.Rectangle(clip, image_crs, False)
+    point_xy = ee.Geometry.Point(xy, image_crs).transform('EPSG:4326', 1)\
+        .coordinates().getInfo()
+    tcorr_img = ssebop.Image.from_landsat_c1_toa(
+        ee.Image(image_id).clip(clip_geom), tcorr_source=tcorr_source,
+        tmax_source=tmax_source, tmax_resample='nearest',
+        tcorr_resample='nearest').tcorr_gridded_cold
+    tcorr = utils.point_image_value(tcorr_img, point_xy)
+    index = utils.getinfo(tcorr_img.get('tcorr_index'))
+    assert abs(tcorr['tcorr'] - expected[0]) <= tol
+    assert index == expected[1]
+
+
+
+
+
 
 
 @pytest.mark.parametrize(

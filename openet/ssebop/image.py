@@ -78,7 +78,8 @@ class Image():
             Elevation source keyword (the default is 'SRTM').
         tcorr_source : {'DYNAMIC', 'GRIDDED', 'SCENE_GRIDDED',
                         'SCENE', 'SCENE_DAILY', 'SCENE_MONTHLY',
-                        'SCENE_ANNUAL', 'SCENE_DEFAULT', or float}, optional
+                        'SCENE_ANNUAL', 'SCENE_DEFAULT',
+                        collection ID string or float}, optional
             Tcorr source keyword (the default is 'DYNAMIC').
         tmax_source : {'CIMIS', 'DAYMET', 'GRIDMET', 'DAYMET_MEDIAN_V2',
                        'TOPOWX_MEDIAN_V0', or float}, optional
@@ -634,6 +635,7 @@ class Image():
                 .filterMetadata('month', 'equals', self._month)\
                 .select(['tcorr'])
 
+
         if 'GRIDDED' == self._tcorr_source.upper():
             # Compute gridded blended Tcorr for the scene
             tcorr_img = ee.Image(self.tcorr_gridded).select(['tcorr'])
@@ -708,6 +710,9 @@ class Image():
             #     .filterMetadata('scene_id', 'equals', scene_id)
             #     .filterMetadata('date', 'equals', self._date)
 
+            # TODO: Check if scene_coll is empty
+            #   Could this be done without a getInfo call?
+
             return ee.Image(scene_coll.first())
 
         elif 'SCENE' in self._tcorr_source.upper():
@@ -741,6 +746,22 @@ class Image():
                         self._tcorr_source, self._tmax_source))
 
             return tcorr_img.rename(['tcorr'])
+
+        elif (self._tcorr_source.startswith('projects/') or
+              self._tcorr_source.startswith('users/')):
+            # CGM: We may want to filter based on the system:index of the tcorr
+            #   collection and self._scene_id since filtering by wrs2 and date
+            #   is not guaranteed to be the image
+            scene_coll = ee.ImageCollection(self._tcorr_source)\
+                .filterDate(self._start_date, self._end_date)\
+                .filterMetadata('wrs2_tile', 'equals', self._wrs2_tile)\
+                .select(['tcorr'])
+            #     .filterMetadata('system:index', 'equals', self._scene_id)
+
+            # TODO: Check if scene_coll is empty
+            #   Could this be done without a getInfo call?
+
+            return ee.Image(scene_coll.first())
 
         else:
             raise ValueError('Unsupported tcorr_source: {}\n'.format(
