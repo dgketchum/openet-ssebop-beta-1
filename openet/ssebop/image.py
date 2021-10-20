@@ -1,6 +1,6 @@
 import datetime
-import math
 import pprint
+import re
 
 import ee
 import openet.core.common
@@ -40,15 +40,17 @@ class Image():
             et_reference_band=None,
             et_reference_factor=None,
             et_reference_resample=None,
+            et_reference_date_type=None,
             dt_source='DAYMET_MEDIAN_V2',
-            elev_source='SRTM',
+            elev_source=None,
             tcorr_source='DYNAMIC',
             tmax_source='DAYMET_MEDIAN_V2',
             elr_flag=False,
             dt_min=5,
             dt_max=25,
             et_fraction_type='alfalfa',
-            reflectance_type='TOA',
+            # reflectance_type='TOA',
+            reflectance_type='SR',
             **kwargs,
         ):
         """Construct a generic SSEBop Image
@@ -75,14 +77,16 @@ class Image():
         dt_source : {'DAYMET_MEDIAN_V0', 'DAYMET_MEDIAN_V1', or float}, optional
             dT source keyword (the default is 'DAYMET_MEDIAN_V1').
         elev_source : {'ASSET', 'GTOPO', 'NED', 'SRTM', or float}, optional
-            Elevation source keyword (the default is 'SRTM').
+            Elevation source keyword (the default is None).
         tcorr_source : {'DYNAMIC', 'GRIDDED', 'SCENE_GRIDDED',
                         'SCENE', 'SCENE_DAILY', 'SCENE_MONTHLY',
                         'SCENE_ANNUAL', 'SCENE_DEFAULT', or float}, optional
             Tcorr source keyword (the default is 'DYNAMIC').
-        tmax_source : {'CIMIS', 'DAYMET', 'GRIDMET', 'DAYMET_MEDIAN_V2',
-                       'TOPOWX_MEDIAN_V0', or float}, optional
-            Maximum air temperature source (the default is 'TOPOWX_MEDIAN_V0').
+        tmax_source : {'CIMIS', 'DAYMET_V3', 'DAYMET_V4', 'GRIDMET',
+                       'DAYMET_MEDIAN_V2', 'CIMIS_MEDIAN_V1', 'GRIDMET_MEDIAN_V1',
+                       collection ID, or float}, optional
+            Maximum air temperature source.  The default is
+            'projects/usgs-ssebop/tmax/daymet_v3_median_1980_2018'.
         elr_flag : bool, str, optional
             If True, apply Elevation Lapse Rate (ELR) adjustment
             (the default is False).
@@ -93,7 +97,8 @@ class Image():
         et_fraction_type : {'alfalfa', 'grass'}, optional
             ET fraction  (the default is 'alfalfa').
         reflectance_type : {'SR', 'TOA'}, optional
-            Used to select the fractional cover equation (the default is 'TOA').
+            Used to select the set the Tcorr NDVI thresholds
+            (the default is 'TOA').
         kwargs : dict, optional
             tmax_resample : {'nearest', 'bilinear'}
             dt_resample : {'nearest', 'bilinear'}
@@ -149,6 +154,7 @@ class Image():
         self.et_reference_band = et_reference_band
         self.et_reference_factor = et_reference_factor
         self.et_reference_resample = et_reference_resample
+        self.et_reference_date_type = et_reference_date_type
 
         # Check reference ET parameters
         if et_reference_factor and not utils.is_number(et_reference_factor):
@@ -159,6 +165,10 @@ class Image():
         if (et_reference_resample and
                 et_reference_resample.lower() not in et_reference_resample_methods):
             raise ValueError('unsupported et_reference_resample method')
+        et_reference_date_type_methods = ['doy', 'daily']
+        if (et_reference_date_type and
+                et_reference_date_type.lower() not in et_reference_date_type_methods):
+            raise ValueError('unsupported et_reference_date_type method')
 
         # Model input parameters
         self._dt_source = dt_source
@@ -277,10 +287,16 @@ class Image():
     @lazy_property
     def et_fraction(self):
         """Fraction of reference ET"""
+
+        # Adjust air temperature based on elevation (Elevation Lapse Rate)
+        # TODO: Eventually point thisat the model.elr_adjust() function instead
+        if self._elr_flag:
+            tmax = ee.Image(model.lapse_adjust(self.tmax, ee.Image(self.elev)))
+        else:
+            tmax = self.tmax
+
         et_fraction = model.et_fraction(
-            lst=self.lst, tmax=self.tmax, tcorr=self.tcorr, dt=self.dt,
-            elr_flag=self._elr_flag, elev=self.elev,
-        )
+            lst=self.lst, tmax=tmax, tcorr=self.tcorr, dt=self.dt)
 
         # TODO: Add support for setting the conversion source dataset
         # TODO: Interpolate "instantaneous" ETo and ETr?
@@ -335,9 +351,42 @@ class Image():
             et_reference_img = ee.Image.constant(self.et_reference_source)
         elif type(self.et_reference_source) is str:
             # Assume a string source is an image collection ID (not an image ID)
-            et_reference_coll = ee.ImageCollection(self.et_reference_source)\
-                .filterDate(self._start_date, self._end_date)\
-                .select([self.et_reference_band])
+            if (self.et_reference_date_type is None or
+                    self.et_reference_date_type.lower() == 'daily'):
+                # Assume the collection is daily with valid system:time_start values
+                et_reference_coll = ee.ImageCollection(self.et_reference_source)\
+                    .filterDate(self._start_date, self._end_date)\
+                    .select([self.et_reference_band])
+            elif self.et_reference_date_type.lower() == 'doy':
+                # Assume the image collection is a climatology with a "DOY" property
+                et_reference_coll = ee.ImageCollection(self.et_reference_source)\
+                    .filter(ee.Filter.rangeContains('DOY', self._doy, self._doy))\
+                    .select([self.et_reference_band])
+                #     .limit(1, 'system:time_start', True)
+
+                # # CGM - Is this mapped function over GRIDMET really needed?
+                # #   Couldn't you just filter the source to the image DOY
+                # def et_reference_replace_daily(image):
+                #     """Mapping function to get daily time_start and system:index
+                #
+                #     Returns the doy-based reference et with daily time properties from GRIDMET
+                #     """
+                #     image_date = ee.Algorithms.Date(image.get("system:time_start"))
+                #     doy = ee.Number(image_date.getRelative('day', 'year')).add(1).double()
+                #     coll_doy = ee.ImageCollection(self.et_reference_source)\
+                #         .filter(ee.Filter.rangeContains('DOY', doy, doy)) \
+                #         .select([self.et_reference_band]).mean() #.first() returns a FC not IC
+                #     return coll_doy.copyProperties(image, ['system:index', 'system:time_start'])
+                # # Map over the GRIDMET collection to get a collection with the
+                # #   a single image for the target date
+                # et_reference_coll = ee.ImageCollection(('IDAHO_EPSCOR/GRIDMET')) \
+                #     .filterDate(self._start_date, self._end_date) \
+                #     .select([self.et_reference_band])\
+                #     .map(et_reference_replace_daily)
+            else:
+                raise ValueError('unsupported et_reference_date_type: {}'.format(
+                    self.et_reference_date_type))
+
             et_reference_img = ee.Image(et_reference_coll.first())
             if self.et_reference_resample in ['bilinear', 'bicubic']:
                 et_reference_img = et_reference_img\
@@ -518,7 +567,9 @@ class Image():
             If `self._elev_source` is not supported.
 
         """
-        if utils.is_number(self._elev_source):
+        if self._elev_source is None:
+            raise ValueError('elev_source was not set')
+        elif utils.is_number(self._elev_source):
             elev_image = ee.Image.constant(float(self._elev_source))
         elif self._elev_source.upper() == 'ASSET':
             elev_image = ee.Image(PROJECT_FOLDER + '/srtm_1km')
@@ -579,51 +630,91 @@ class Image():
             'nodata': 9,
         }
 
+        # First check if Tcorr is a number, and if so return
         if utils.is_number(self._tcorr_source):
             return ee.Image.constant(float(self._tcorr_source))\
                 .rename(['tcorr']).set({'tcorr_index': tcorr_indices['user']})
+        # Then check if Tmax source is a number but Tcorr is a spatial calculation
+        elif (utils.is_number(self._tmax_source) and
+              (self._tcorr_source.upper() in ['DYNAMIC', 'SCENE_GRIDDED'] or
+               'SCENE' in self._tcorr_source.upper())):
+            raise ValueError(
+                '\nInvalid tmax_source for tcorr: {} / {}\n'.format(
+                    self._tcorr_source, self._tmax_source))
+
 
         # Set Tcorr folder and collections based on the Tmax source (if needed)
         if 'SCENE_GRIDDED' == self._tcorr_source.upper():
-            # Use the precomputed scene monthly/annual climatologies if Tcorr
-            #   can't be computed dynamically.
-            tcorr_folder = PROJECT_FOLDER + '/tcorr_gridded'
+            # Check that there is a tcorr_gridded collection corresponding to the tmax
+            # TODO: We should probably also check if the Landsat Collection numbers
+            #   match but this is probably good enough for now
             scene_dict = {
-                'DAYMET_MEDIAN_V2': tcorr_folder + '/daymet_median_v2_scene',
+                'DAYMET_MEDIAN_V2':
+                    f'{PROJECT_FOLDER}/tcorr_gridded/daymet_median_v2_scene',
+                # f'daymet_v3_median_1980_2018':
+                #     f'{PROJECT_FOLDER}/tcorr_gridded/daymet_median_v2_scene',
+                f'daymet_v3_median_1980_2018':
+                    f'{PROJECT_FOLDER}/tcorr_gridded/c01/daymet_v3_median_1980_2018',
+                f'daymet_v4_median_1980_2019':
+                    f'{PROJECT_FOLDER}/tcorr_gridded/c02/daymet_v4_median_1980_2019',
+                f'daymet_v4_mean_1981_2010':
+                    f'{PROJECT_FOLDER}/tcorr_gridded/c02/daymet_v4_mean_1981_2010',
+                f'daymet_v4_mean_1981_2010_elr':
+                    f'{PROJECT_FOLDER}/tcorr_gridded/c02/daymet_v4_mean_1981_2010_elr',
             }
 
-            if (utils.is_number(self._tmax_source) or
-                    self._tmax_source.upper() not in scene_dict.keys()):
+            if self._tmax_source.upper() in scene_dict.keys():
+                tmax_key = self._tmax_source.upper()
+            elif (self._tmax_source.startswith('projects/') and
+                    self._tmax_source.split('/')[-1] in scene_dict.keys()):
+                tmax_key = self._tmax_source.split('/')[-1]
+                print('the tmax key \n', tmax_key)
+            else:
                 raise ValueError(
                     '\nInvalid tmax_source for tcorr: {} / {}\n'.format(
                         self._tcorr_source, self._tmax_source))
-            tmax_key = self._tmax_source.upper()
+
         elif ('DYNAMIC' == self._tcorr_source.upper() or
-              'SCENE' in self._tcorr_source.upper()):
+              self._tcorr_source.upper().startswith('SCENE')):
             # Use the precomputed scene monthly/annual climatologies if Tcorr
             #   can't be computed dynamically.
-            tcorr_folder = PROJECT_FOLDER + '/tcorr_scene'
             scene_dict = {
-                'DAYMET_MEDIAN_V2': tcorr_folder + '/daymet_median_v2_scene',
+                'DAYMET_MEDIAN_V2':
+                    f'{PROJECT_FOLDER}/tcorr_scene/daymet_median_v2_scene',
+                f'daymet_v3_median_1980_2018':
+                    f'{PROJECT_FOLDER}/tcorr_scene/daymet_median_v2_scene',
             }
             month_dict = {
-                'DAYMET_MEDIAN_V2': tcorr_folder + '/daymet_median_v2_monthly',
+                'DAYMET_MEDIAN_V2':
+                    f'{PROJECT_FOLDER}/tcorr_scene/daymet_median_v2_monthly',
+                f'daymet_v3_median_1980_2018':
+                    f'{PROJECT_FOLDER}/tcorr_scene/daymet_median_v2_monthly',
             }
             annual_dict = {
-                'DAYMET_MEDIAN_V2': tcorr_folder + '/daymet_median_v2_annual',
+                'DAYMET_MEDIAN_V2':
+                    f'{PROJECT_FOLDER}/tcorr_scene/daymet_median_v2_annual',
+                f'daymet_v3_median_1980_2018':
+                    f'{PROJECT_FOLDER}/tcorr_scene/daymet_median_v2_annual',
             }
             default_dict = {
-                'DAYMET_MEDIAN_V2': tcorr_folder + '/daymet_median_v2_default',
+                'DAYMET_MEDIAN_V2':
+                    f'{PROJECT_FOLDER}/tcorr_scene/daymet_median_v2_default',
+                f'daymet_v3_median_1980_2018':
+                    f'{PROJECT_FOLDER}/tcorr_scene/daymet_median_v2_default',
             }
 
             # Check Tmax source value
-            if (utils.is_number(self._tmax_source) or
-                    self._tmax_source.upper() not in default_dict.keys()):
+            if self._tmax_source.upper() in scene_dict.keys():
+                tmax_key = self._tmax_source.upper()
+            elif (self._tmax_source.startswith('projects/') and
+                    self._tmax_source.split('/')[-1] in scene_dict.keys()):
+                tmax_key = self._tmax_source.split('/')[-1]
+            else:
                 raise ValueError(
                     '\nInvalid tmax_source for tcorr: {} / {}\n'.format(
                         self._tcorr_source, self._tmax_source))
-            tmax_key = self._tmax_source.upper()
 
+            # Build the Tcorr scene and fallback collections
             default_coll = ee.ImageCollection(default_dict[tmax_key])\
                 .filterMetadata('wrs2_tile', 'equals', self._wrs2_tile)
             annual_coll = ee.ImageCollection(annual_dict[tmax_key])\
@@ -634,10 +725,36 @@ class Image():
                 .filterMetadata('month', 'equals', self._month)\
                 .select(['tcorr'])
 
-        if 'GRIDDED' == self._tcorr_source.upper():
+
+        # Load the Tcorr image
+        # if self._tcorr_source.startswith('projects/'):
+        if re.match('projects/.+/tcorr_gridded/.+', self._tcorr_source):
+            # Read precomputed tcorr images
+            # CGM - Do we need to check that the tmax and tcorr source have the
+            #   the same "name"?
+            # CGM - How strict should the name matching be in the regex?
+            #   For now I'm only matching "tcorr_gridded" folders
+            # CGM - This section will need to be modified if monthly fallback
+            #   values are needed
+            # The following check assumes the tmax source is also a collection ID
+            tmax_key = self._tmax_source.split('/')[-1]
+            if tmax_key != self._tcorr_source.split('/')[-1]:
+                raise ValueError(
+                        '\nInvalid tmax_source for tcorr: {} / {}\n'.format(
+                            self._tcorr_source, self._tmax_source))
+
+            scene_coll = ee.ImageCollection(self._tcorr_source)\
+                .filterDate(self._start_date, self._end_date)\
+                .filterMetadata('wrs2_tile', 'equals', self._wrs2_tile)\
+                .select(['tcorr'])
+            #     .filterMetadata('scene_id', 'equals', scene_id)
+            #     .filterMetadata('date', 'equals', self._date)
+            return ee.Image(scene_coll.first())
+        elif 'GRIDDED' == self._tcorr_source.upper():
             # Compute gridded blended Tcorr for the scene
             tcorr_img = ee.Image(self.tcorr_gridded).select(['tcorr'])
             # e.g. .select([0, 1], ['tcorr', 'count'])
+
             if self._tcorr_resample.lower() in ['bilinear']:
                 tcorr_img = tcorr_img\
                     .resample(self._tcorr_resample.lower())\
@@ -651,7 +768,7 @@ class Image():
 
         elif 'GRIDDED_COLD' == self._tcorr_source.upper():
             # Compute gridded Tcorr for the scene
-            tcorr_img = self.tcorr_gridded_cold
+            tcorr_img = ee.Image(self.tcorr_gridded_cold).select(['tcorr'])
 
             # EE will resample using nearest neighbor by default
             if self._tcorr_resample.lower() in ['bilinear']:
@@ -700,7 +817,8 @@ class Image():
 
             return ee.Image(tcorr_coll.first()).rename(['tcorr'])
 
-        elif 'SCENE_GRIDDED' in self._tcorr_source.upper():
+        elif 'SCENE_GRIDDED' == self._tcorr_source.upper():
+            # Load precomputed gridded Tcorr images
             scene_coll = ee.ImageCollection(scene_dict[tmax_key])\
                 .filterDate(self._start_date, self._end_date)\
                 .filterMetadata('wrs2_tile', 'equals', self._wrs2_tile)\
@@ -710,7 +828,8 @@ class Image():
 
             return ee.Image(scene_coll.first())
 
-        elif 'SCENE' in self._tcorr_source.upper():
+        elif self._tcorr_source.upper().startswith('SCENE'):
+            # Load Tcorr from precomputed scene images with monthly/annual fallbacks
             scene_coll = ee.ImageCollection(scene_dict[tmax_key])\
                 .filterDate(self._start_date, self._end_date)\
                 .filterMetadata('wrs2_tile', 'equals', self._wrs2_tile)\
@@ -748,7 +867,7 @@ class Image():
 
     @lazy_property
     def tmax(self):
-        """Fall back on median Tmax if daily image does not exist
+        """Get Tmax image from precomputed climatology collections or dynamically
 
         Returns
         -------
@@ -760,112 +879,58 @@ class Image():
             If `self._tmax_source` is not supported.
 
         """
-        doy_filter = ee.Filter.calendarRange(self._doy, self._doy, 'day_of_year')
-        date_today = datetime.datetime.today().strftime('%Y-%m-%d')
-
         if utils.is_number(self._tmax_source):
+            # Allow Tmax source to be set as a number for testing
             tmax_image = ee.Image.constant(float(self._tmax_source))\
                 .rename(['tmax'])\
-                .set('tmax_version', 'custom_{}'.format(self._tmax_source))
-        elif self._tmax_source.upper() == 'CIMIS':
-            daily_coll_id = 'projects/earthengine-legacy/assets/' \
-                            'projects/climate-engine/cimis/daily'
-            daily_coll = ee.ImageCollection(daily_coll_id)\
-                .filterDate(self._start_date, self._end_date)\
-                .select(['Tx'], ['tmax']).map(utils.c_to_k)
-            daily_image = ee.Image(daily_coll.first())\
-                .set('tmax_version', date_today)
-            median_version = 'median_v1'
-            median_coll = ee.ImageCollection(
-                PROJECT_FOLDER + '/tmax/cimis_{}'.format(median_version))
-            median_image = ee.Image(median_coll.filter(doy_filter).first())\
-                .set('tmax_version', median_version)
-            tmax_image = ee.Image(ee.Algorithms.If(
-                daily_coll.size().gt(0), daily_image, median_image))
-        elif self._tmax_source.upper() == 'DAYMET':
+                .set({'tmax_source': 'custom_{}'.format(self._tmax_source)})
+        elif re.match(r'^projects/.+/tmax/.+_(mean|median)_\d{4}_\d{4}(_\w+)?',
+                      self._tmax_source):
+            # Process Tmax source as a collection ID
+            # The new Tmax collections do not have a time_start so filter using
+            #   the "doy" property instead
+            tmax_coll = ee.ImageCollection(self._tmax_source)\
+                .filterMetadata('doy', 'equals', self._doy)
+            #     .filterMetadata('doy', 'equals', self._doy.format('%03d'))
+            tmax_image = ee.Image(tmax_coll.first())\
+                .set({'tmax_source': self._tmax_source})
+        elif '_MEDIAN_' in self._tmax_source:
+            # Process the existing keyword median sources
+            doy_filter = ee.Filter.calendarRange(self._doy, self._doy, 'day_of_year')
+            tmax_coll = ee.ImageCollection(
+                PROJECT_FOLDER + '/tmax/' + self._tmax_source.lower())
+            tmax_image = ee.Image(tmax_coll.filter(doy_filter).first())\
+                .set({'tmax_source': self._tmax_source})
+        elif self._tmax_source.upper() in ['DAYMET_V3', 'DAYMET_V4']:
             # DAYMET does not include Dec 31st on leap years
-            # Adding one extra date to end date to avoid errors
-            daily_coll = ee.ImageCollection('NASA/ORNL/DAYMET_V3')\
+            # Adding one extra date to end date to avoid errors here
+            # This image be slightly different than the median collection for
+            #   Dec 31st on leap years (DOY 366).
+            tmax_coll = ee.ImageCollection(f'NASA/ORNL/{self._tmax_source.upper()}')\
                 .filterDate(self._start_date, self._end_date.advance(1, 'day'))\
                 .select(['tmax']).map(utils.c_to_k)
-            daily_image = ee.Image(daily_coll.first())\
-                .set('tmax_version', date_today)
-            median_version = 'median_v2'
-            median_coll = ee.ImageCollection(
-                PROJECT_FOLDER + '/tmax/daymet_{}'.format(median_version))
-            median_image = ee.Image(median_coll.filter(doy_filter).first())\
-                .set('tmax_version', median_version)
-            tmax_image = ee.Image(ee.Algorithms.If(
-                daily_coll.size().gt(0), daily_image, median_image))
+            tmax_image = ee.Image(tmax_coll.first())\
+                .set({'tmax_source': self._tmax_source})
+        elif self._tmax_source.upper() == 'CIMIS':
+            tmax_coll_id = 'projects/earthengine-legacy/assets/' \
+                           'projects/climate-engine/cimis/daily'
+            tmax_coll = ee.ImageCollection(tmax_coll_id)\
+                .filterDate(self._start_date, self._end_date)\
+                .select(['Tx'], ['tmax']).map(utils.c_to_k)
+            tmax_image = ee.Image(tmax_coll.first())\
+                .set({'tmax_source': self._tmax_source})
         elif self._tmax_source.upper() == 'GRIDMET':
-            daily_coll = ee.ImageCollection('IDAHO_EPSCOR/GRIDMET')\
+            tmax_coll = ee.ImageCollection('IDAHO_EPSCOR/GRIDMET')\
                 .filterDate(self._start_date, self._end_date)\
                 .select(['tmmx'], ['tmax'])
-            daily_image = ee.Image(daily_coll.first())\
-                .set('tmax_version', date_today)
-            median_version = 'median_v1'
-            median_coll = ee.ImageCollection(
-                PROJECT_FOLDER + '/tmax/gridmet_{}'.format(median_version))
-            median_image = ee.Image(median_coll.filter(doy_filter).first())\
-                .set('tmax_version', median_version)
-            tmax_image = ee.Image(ee.Algorithms.If(
-                daily_coll.size().gt(0), daily_image, median_image))
+            tmax_image = ee.Image(tmax_coll.first())\
+                .set({'tmax_source': self._tmax_source})
         # elif self.tmax_source.upper() == 'TOPOWX':
-        #     daily_coll = ee.ImageCollection('X')\
+        #     tmax_coll = ee.ImageCollection('X')\
         #         .filterDate(self.start_date, self.end_date)\
         #         .select(['tmmx'], ['tmax'])
-        #     daily_image = ee.Image(daily_coll.first())\
-        #         .set('tmax_version', date_today)
-        #
-        #     median_version = 'median_v1'
-        #     median_coll = ee.ImageCollection(
-        #         PROJECT_FOLDER + '/tmax/topowx_{}'.format(median_version))
-        #     median_image = ee.Image(median_coll.filter(doy_filter).first())\
-        #         .set('tmax_version', median_version)
-        #
-        #     tmax_image = ee.Image(ee.Algorithms.If(
-        #         daily_coll.size().gt(0), daily_image, median_image))
-        elif self._tmax_source.upper() == 'CIMIS_MEDIAN_V1':
-            median_version = 'median_v1'
-            median_coll = ee.ImageCollection(
-                PROJECT_FOLDER + '/tmax/cimis_{}'.format(median_version))
-            tmax_image = ee.Image(median_coll.filter(doy_filter).first())\
-                .set('tmax_version', median_version)
-        elif self._tmax_source.upper() == 'DAYMET_MEDIAN_V0':
-            median_version = 'median_v0'
-            median_coll = ee.ImageCollection(
-                PROJECT_FOLDER + '/tmax/daymet_{}'.format(median_version))
-            tmax_image = ee.Image(median_coll.filter(doy_filter).first())\
-                .set('tmax_version', median_version)
-        elif self._tmax_source.upper() == 'DAYMET_MEDIAN_V1':
-            median_version = 'median_v1'
-            median_coll = ee.ImageCollection(
-                PROJECT_FOLDER + '/tmax/daymet_{}'.format(median_version))
-            tmax_image = ee.Image(median_coll.filter(doy_filter).first())\
-                .set('tmax_version', median_version)
-        elif self._tmax_source.upper() == 'DAYMET_MEDIAN_V2':
-            median_version = 'median_v2'
-            median_coll = ee.ImageCollection(
-                PROJECT_FOLDER + '/tmax/daymet_{}'.format(median_version))
-            tmax_image = ee.Image(median_coll.filter(doy_filter).first()) \
-                .set('tmax_version', median_version)
-        elif self._tmax_source.upper() == 'GRIDMET_MEDIAN_V1':
-            median_version = 'median_v1'
-            median_coll = ee.ImageCollection(
-                PROJECT_FOLDER + '/tmax/gridmet_{}'.format(median_version))
-            tmax_image = ee.Image(median_coll.filter(doy_filter).first())\
-                .set('tmax_version', median_version)
-        elif self._tmax_source.upper() == 'TOPOWX_MEDIAN_V0':
-            median_version = 'median_v0'
-            median_coll = ee.ImageCollection(
-                PROJECT_FOLDER + '/tmax/topowx_{}'.format(median_version))
-            tmax_image = ee.Image(median_coll.filter(doy_filter).first())\
-                .set('tmax_version', median_version)
-        # elif self.tmax_source.upper() == 'TOPOWX_MEDIAN_V1':
-        #     median_version = 'median_v1'
-        #     median_coll = ee.ImageCollection(
-        #         PROJECT_FOLDER + '/tmax/topowx_{}'.format(median_version))
-        #     tmax_image = ee.Image(median_coll.filter(doy_filter).first())
+        #     tmax_image = ee.Image(tmax_coll.first())\
+        #         .set({'tmax_source': self._tmax_source})
         else:
             raise ValueError('Unsupported tmax_source: {}\n'.format(
                 self._tmax_source))
@@ -876,7 +941,7 @@ class Image():
         # TODO: A reproject call may be needed here also
         # tmax_image = tmax_image.reproject(self.crs, self.transform)
 
-        return tmax_image.set('tmax_source', self._tmax_source)
+        return tmax_image
 
     @classmethod
     def from_image_id(cls, image_id, **kwargs):
@@ -1125,6 +1190,17 @@ class Image():
                        0.0000275, 0.0000275, 0.00341802, 1])\
             .add([-0.2, -0.2, -0.2, -0.2, -0.2, -0.2, 149.0, 1])\
 
+        # Default the cloudmask flags to True if they were not
+        # Eventually these will probably all default to True in openet.core
+        if 'cirrus_flag' not in cloudmask_args.keys():
+            cloudmask_args['cirrus_flag'] = True
+        if 'dilate_flag' not in cloudmask_args.keys():
+            cloudmask_args['dilate_flag'] = True
+        if 'shadow_flag' not in cloudmask_args.keys():
+            cloudmask_args['shadow_flag'] = True
+        if 'snow_flag' not in cloudmask_args.keys():
+            cloudmask_args['snow_flag'] = True
+
         cloud_mask = openet.core.common.landsat_c2_sr_cloud_mask(
             sr_image, **cloudmask_args)
 
@@ -1171,7 +1247,7 @@ class Image():
             ndvi_threshold = 0.7
 
         # Select high NDVI pixels that are also surrounded by high NDVI
-        ndvi_smooth_mask = ndvi.focal_mean(radius=120, units='meters')\
+        ndvi_smooth_mask = ndvi.focal_mean(radius=90, units='meters')\
             .reproject(crs=self.crs, crsTransform=self.transform)\
             .gte(ndvi_threshold)
         ndvi_buffer_mask = ndvi.gte(ndvi_threshold)\
@@ -1216,7 +1292,7 @@ class Image():
             ndvi_threshold = 0.25
 
         # Select LOW (but non-negative) NDVI pixels that are also surrounded by LOW NDVI, but
-        ndvi_smooth = ndvi.focal_mean(radius=120, units='meters') \
+        ndvi_smooth = ndvi.focal_mean(radius=90, units='meters') \
             .reproject(crs=self.crs, crsTransform=self.transform)
         ndvi_smooth_mask = ndvi_smooth.gt(0.0).And(ndvi_smooth.lte(ndvi_threshold))
 
@@ -1358,7 +1434,7 @@ class Image():
         #     .updateMask(tcorr_coarse_cold_img.select(['count'])
         #                 .gte(self.min_pixels_per_grid_cell))
         # change variable names in order to keep same naming conventions lower down.
-        tcorr_coarse_cold = tcorr_coarse_cold_img
+        tcorr_coarse_cold = tcorr_coarse_cold_img.select(['tcorr'])
 
         # Count the number of coarse resolution Tcorr cells
         count_coarse_cold = tcorr_coarse_cold \
@@ -1378,6 +1454,7 @@ class Image():
         #                 .gte(self.min_pixels_per_grid_cell))
         tcorr_coarse_hot = tcorr_coarse_hot_img.select(['tcorr']) \
             .updateMask(tcorr_coarse_hot_img.select(['count']))
+
         # Count the number of coarse resolution Tcorr cells
         count_coarse_hot = tcorr_coarse_hot \
             .reduceRegion(reducer=ee.Reducer.count(),
@@ -1500,7 +1577,9 @@ class Image():
         score_04 = zero_img.add(tcorr_rn04_blended.gt(0)).updateMask(1)
         score_16 = zero_img.add(tcorr_rn16_blended.gt(0)).updateMask(1)
 
-        # cold and hot scores ( these scores are just to help the end user see areas where either hot or cold images to begin with
+        # cold and hot scores
+        # These scores are just to help the end user see areas where either
+        #   hot or cold images to begin with
         cold_rn05_score = zero_img.add(tcorr_rn05_cold.gt(0)).updateMask(1)
         cold_rn05_score = cold_rn05_score.multiply(9).updateMask(1)
         coldscore = zero_img.add(tcorr_coarse_cold.gt(0)).updateMask(1)
@@ -1541,8 +1620,18 @@ class Image():
         tcorr = ee.Image([fm_mosaic_4, fm_mosaic_3, fm_mosaic_2, fm_mosaic_1])\
             .reduce(ee.Reducer.firstNonNull()).updateMask(1)
 
+        tcorr = tcorr\
+            .reduceNeighborhood(reducer=ee.Reducer.mean(),
+                                kernel=ee.Kernel.circle(radius=1, units='pixels'),
+                                # kernel=ee.Kernel.square(radius=1, units='pixels'),
+                                # optimization='boxcar',
+                                skipMasked=False)\
+            .reproject(crs=self.crs, crsTransform=coarse_transform)\
+            .updateMask(1)
+
         quality_score_img = ee.Image([total_score_img, hotscore, coldscore, cold_rn05_score])\
             .reduce(ee.Reducer.sum())
+
         return ee.Image([tcorr, quality_score_img]).rename(['tcorr', 'quality'])\
             .set(self._properties)\
             .set({'tcorr_index': 0,
@@ -1561,7 +1650,6 @@ class Image():
         # NOTE: This transform is being snapped to the Landsat grid
         #   but this may not be necessary
         coarse_transform = [5000, 0, 15, 0, -5000, 15]
-        # coarse_transform = [5000, 0, 0, 0, -5000, 0]
 
         # Resample to 5km taking 2.5 percentile (equal to Mean-2StDev)
         tcorr_coarse_img = self.tcorr_image\
@@ -1575,28 +1663,19 @@ class Image():
 
         # Mask cells without enough fine resolution Tcorr cells
         # The count band is dropped after it is used to mask
-        tcorr_coarse = tcorr_coarse_img.select(['tcorr'])\
-            .updateMask(tcorr_coarse_img.select(['count'])
-                        .gte(self.min_pixels_per_grid_cell))
+        # tcorr_coarse = tcorr_coarse_img.select(['tcorr'])\
+        #     .updateMask(tcorr_coarse_img.select(['count'])
+        #                 .gte(self.min_pixels_per_grid_cell))
 
         # Count the number of coarse resolution Tcorr cells
-        count_coarse = tcorr_coarse\
+        count_coarse = tcorr_coarse_img\
             .reduceRegion(reducer=ee.Reducer.count(), crs=self.crs,
                           crsTransform=coarse_transform,
                           bestEffort=False, maxPixels=100000)
         tcorr_count = ee.Number(count_coarse.get('tcorr'))
 
-        # TODO: Test the reduceNeighborhood optimization parameters
-        """
-        ReduceNeighborhood Optimization
-        optimization (String, default: null):
-        Optimization strategy. Options are 'boxcar' and 'window'. 
-        The 'boxcar' method is a fast method for computing count, sum or mean. 
-        It requires a homogeneous kernel, a single-input reducer and either 
-        MASK, KERNEL or no weighting. The 'window' method uses a running window, 
-        and has the same requirements as 'boxcar', but can use any single input 
-        reducer. Both methods require considerable additional memory.
-        """
+        # select only the tcorr band.
+        tcorr_coarse = tcorr_coarse_img.select(['tcorr'])
 
         # Do reduce neighborhood to interpolate c factor
         tcorr_rn02 = tcorr_coarse\
@@ -1605,12 +1684,14 @@ class Image():
                                 skipMasked=False)\
             .reproject(crs=self.crs, crsTransform=coarse_transform)\
             .updateMask(1)
+
         tcorr_rn04 = tcorr_coarse\
             .reduceNeighborhood(reducer=ee.Reducer.mean(),
                                 kernel=ee.Kernel.square(radius=4, units='pixels'),
                                 skipMasked=False)\
             .reproject(crs=self.crs, crsTransform=coarse_transform)\
             .updateMask(1)
+
         tcorr_rn16 = tcorr_coarse\
             .reduceNeighborhood(reducer=ee.Reducer.mean(),
                                 kernel=ee.Kernel.square(radius=16, units='pixels'),
@@ -1618,66 +1699,79 @@ class Image():
             .reproject(crs=self.crs, crsTransform=coarse_transform)\
             .updateMask(1)
 
+        # rn64 (added to make sure that the whole scene is covered on 3/25/2021)
+        tcorr_rn64 = tcorr_coarse \
+            .reduceNeighborhood(reducer=ee.Reducer.mean(),
+                                kernel=ee.Kernel.square(radius=64, units='pixels'),
+                                skipMasked=False) \
+            .reproject(crs=self.crs, crsTransform=coarse_transform) \
+            .updateMask(1)
+
         # --- In this section we build an image to weight the cfactor
         #   proportionally to how close it is to the original c ---
-        fm_mosaic = ee.Image([tcorr_coarse, tcorr_rn02, tcorr_rn04, tcorr_rn16])\
+        fm_mosaic = ee.Image([tcorr_coarse, tcorr_rn02, tcorr_rn04, tcorr_rn16, tcorr_rn64])\
             .reduce(ee.Reducer.firstNonNull())
         zero_img = fm_mosaic.multiply(0).updateMask(1)
+
+        ## ===== SCORING =====
+        # 0 - Empty: there was no c factor of any interpolation that covers the cell
+        # 1 - RN 64 zonal filled the cell (zonal stats value is not weighted)
+        # 2 - RN 64 and RN 16 coverage (weighted)
+        # 3 - RN 64, RN16 and RN4 coverage (weighted)
+        # 4 - RN 64, RN16, RN4 and RN02 coverage (weighted)
+        # 5 - 5km original COLD cfactor calculated for cell (The original value, however, is smoothed by weighting)
 
         # We make a series of binary images to map the extent of each layer's c factor
         score_coarse = zero_img.add(tcorr_coarse.gt(0)).updateMask(1)
         score_02 = zero_img.add(tcorr_rn02.gt(0)).updateMask(1)
         score_04 = zero_img.add(tcorr_rn04.gt(0)).updateMask(1)
         score_16 = zero_img.add(tcorr_rn16.gt(0)).updateMask(1)
+        score_64 = zero_img.add(tcorr_rn64.gt(0)).updateMask(1)
 
-        # This layer has a score of 0-4 based on where the binaries overlap.
+        # This layer has a score of 0-5 based on where the binaries overlap.
         # This will help us to know where to apply different weights as directed by G. Senay.
-        total_score_img = ee.Image([score_coarse, score_02, score_04, score_16])\
+        total_score_img = ee.Image([score_coarse, score_02, score_04, score_16, score_64])\
             .reduce(ee.Reducer.sum())
 
         # *WEIGHTED MEAN*
         # Use the score band to mask out the areas of overlap to weight the c factor:
-        # for 4:3:2:1 use weights (4/10, 3/10, 2/10, 1/10)
-        fm_mosaic_4 = ee.Image([tcorr_coarse.multiply(0.4).updateMask(1),
+
+        # Same as 4:3:2:1 below but use weights 75/1000 and 25/1000 for the last two layers to get 1/10
+        fm_mosaic_5 = ee.Image([tcorr_coarse.multiply(0.4).updateMask(1),
                                 tcorr_rn02.multiply(0.3).updateMask(1),
                                 tcorr_rn04.multiply(0.2).updateMask(1),
-                                tcorr_rn16.multiply(0.1).updateMask(1)])\
+                                tcorr_rn16.multiply(0.075).updateMask(1),
+                                tcorr_rn64.multiply(0.025).updateMask(1)])\
+            .reduce(ee.Reducer.sum())\
+            .updateMask(total_score_img.eq(5))
+
+        # for 4:3:2:1 use weights (4/10, 3/10, 2/10, 1/10)
+        fm_mosaic_4 = ee.Image([tcorr_rn02.multiply(0.4).updateMask(1),
+                                tcorr_rn04.multiply(0.3).updateMask(1),
+                                tcorr_rn16.multiply(0.2).updateMask(1),
+                                tcorr_rn64.multiply(0.1).updateMask(1)])\
             .reduce(ee.Reducer.sum())\
             .updateMask(total_score_img.eq(4))
 
-        # CM - Why does the previous mosaic have .updateMask(1) calls but not these?
         # for 3:2:1 use weights (3/6, 2/6, 1/6)
-        fm_mosaic_3 = ee.Image([tcorr_rn02.multiply(0.5),
-                                tcorr_rn04.multiply(0.33),
-                                tcorr_rn16.multiply(0.17)])\
+        fm_mosaic_3 = ee.Image([tcorr_rn04.multiply(0.5).updateMask(1),
+                                tcorr_rn16.multiply(0.33).updateMask(1),
+                                tcorr_rn64.multiply(0.17).updateMask(1)])\
             .reduce(ee.Reducer.sum())\
             .updateMask(total_score_img.eq(3))
 
         # for 2:1 use weights (2/3, 1/3)
-        fm_mosaic_2 = ee.Image([tcorr_rn04.multiply(0.67),
-                                tcorr_rn16.multiply(0.33)])\
+        fm_mosaic_2 = ee.Image([tcorr_rn16.multiply(0.67).updateMask(1),
+                                tcorr_rn64.multiply(0.33).updateMask(1)])\
             .reduce(ee.Reducer.sum())\
             .updateMask(total_score_img.eq(2))
 
-        # for 1 use the value of 16
-        fm_mosaic_1 = tcorr_rn16.updateMask(total_score_img.eq(1))
+        # for 1 use the value of 64
+        fm_mosaic_1 = tcorr_rn64.updateMask(total_score_img.eq(1))
 
         # Combine the weighted means into a single image using first non-null
-        tcorr = ee.Image([fm_mosaic_4, fm_mosaic_3, fm_mosaic_2, fm_mosaic_1])\
+        tcorr = ee.Image([fm_mosaic_5, fm_mosaic_4, fm_mosaic_3, fm_mosaic_2, fm_mosaic_1])\
             .reduce(ee.Reducer.firstNonNull())
-
-        # CGM - This should probably be done in main Tcorr method with other compositing
-        # # Fill missing pixels with the full image Tcorr
-        # if self.tcorr_gridded_scene_fill_flag:
-        #     t_stats = ee.Dictionary(self.tcorr_stats) \
-        #         .combine({'tcorr_value': 0, 'tcorr_count': 0}, overwrite=False)
-        #     tcorr_value = ee.Number(t_stats.get('tcorr_value'))
-        #     # tcorr_count = ee.Number(t_stats.get('tcorr_count'))
-        #     # tcorr_index = tcorr_count.lt(self.min_pixels_per_image).multiply(9)
-        #     # tcorr_index = ee.Number(
-        #     #     ee.Algorithms.If(tcorr_count.gte(self.min_pixels_per_image), 0, 9))
-        #     # mask_img = mask_img.add(tcorr_count.gte(self.min_pixels_per_image))
-        #     tcorr = tcorr.where(tcorr.mask(), tcorr_value)
 
         # Do one more reduce neighborhood to smooth the c factor
         tcorr = tcorr\
@@ -1687,10 +1781,7 @@ class Image():
             .reproject(crs=self.crs, crsTransform=coarse_transform)\
             .updateMask(1)
 
-        # TODO - the tcorr count band may want to be returned
-        #   for further analysis of tcorr count on cfactor
-
-        return tcorr.select([0], ['tcorr'])\
-            .set(self._properties)\
+        return ee.Image([tcorr, total_score_img]).rename(['tcorr', 'quality']) \
+            .set(self._properties) \
             .set({'tcorr_index': 1,
                   'tcorr_coarse_count': tcorr_count})

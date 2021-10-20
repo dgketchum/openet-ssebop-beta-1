@@ -44,8 +44,10 @@ class Collection():
             et_reference_band=None,
             et_reference_factor=None,
             et_reference_resample=None,
+            et_reference_date_type=None,
             filter_args=None,
             model_args=None,
+            filter=None,
             # model_args={'et_reference_source': 'IDAHO_EPSCOR/GRIDMET',
             #             'et_reference_band': 'etr',
             #             'et_reference_factor': 0.85,
@@ -86,9 +88,9 @@ class Collection():
             Reference ET resampling.  The default is None which is equivalent
             to nearest neighbor resampling.
         filter_args : dict
-            Image collection filter keyword arguments (the default is None).
-            Organize filter arguments as a nested dictionary with the primary
-            key being the collection ID.
+            Image collection filters (the default is None).
+            Organize filters as a dictionary with the key being
+            the collection ID and the value an ee.Filter() object.
         model_args : dict
             Model Image initialization keyword arguments (the default is None).
             Dictionary will be passed through to model Image init.
@@ -106,6 +108,7 @@ class Collection():
             self.model_args = model_args
         else:
             self.model_args = {}
+
         if filter_args is not None:
             self.filter_args = filter_args
         else:
@@ -116,6 +119,7 @@ class Collection():
         self.et_reference_band = et_reference_band
         self.et_reference_factor = et_reference_factor
         self.et_reference_resample = et_reference_resample
+        self.et_reference_date_type = et_reference_date_type
 
         # Check reference ET parameters
         if et_reference_factor and not utils.is_number(et_reference_factor):
@@ -126,6 +130,10 @@ class Collection():
         if (et_reference_resample and
                 et_reference_resample.lower() not in et_reference_resample_methods):
             raise ValueError('unsupported et_reference_resample method')
+        et_reference_date_type_methods = ['doy', 'daily']
+        if (et_reference_date_type and
+                et_reference_date_type.lower() not in et_reference_date_type_methods):
+            raise ValueError('unsupported et_reference_date_type method')
 
         # Set/update the reference ET parameters in model_args if they were set in init()
         if self.et_reference_source:
@@ -136,6 +144,12 @@ class Collection():
             self.model_args['et_reference_factor'] = self.et_reference_factor
         if self.et_reference_resample:
             self.model_args['et_reference_resample'] = self.et_reference_resample
+        if self.et_reference_date_type:
+            self.model_args['et_reference_date_type'] = self.et_reference_date_type
+        # elif self.et_reference_date_type is None:
+        #     # Extra conditional needed since None is currently a valid date_type
+        #     # This should probably be changed so that "daily" is the default
+        #     self.model_args['et_reference_date_type'] = None
 
         # Model specific variables that can be interpolated to a daily timestep
         # CGM - Should this be specified in the interpolation method instead?
@@ -269,9 +283,19 @@ class Collection():
                 # TODO: Check if PROCESSING_LEVEL needs to be filtered on
                 #     .filterMetadata('PROCESSING_LEVEL', 'equals', 'L2SP')
 
-                # TODO: Need to come up with a system for applying
-                #   generic filter arguments to the collections
-                if coll_id in self.filter_args.keys():
+                # TODO: Move this to a separate function (maybe in utils.py?)
+                #   since  it is identical for all the supported collections
+                if (self.filter_args is None or
+                        not isinstance(self.filter_args, dict) or
+                        coll_id not in self.filter_args.keys()):
+                    pass
+                elif isinstance(self.filter_args[coll_id], ee.ComputedObject):
+                    input_coll = input_coll.filter(self.filter_args[coll_id])
+                elif isinstance(self.filter_args[coll_id], list):
+                    # TODO: This generic dictionary based filtering should
+                    #   probably be removed since only the "equals" filter
+                    #   has been implemented and the functionality is better
+                    #   handled with the other two options.
                     for f in copy.deepcopy(self.filter_args[coll_id]):
                         try:
                             filter_type = f.pop('type')
@@ -279,6 +303,8 @@ class Collection():
                             continue
                         if filter_type.lower() == 'equals':
                             input_coll = input_coll.filter(ee.Filter.equals(**f))
+                else:
+                    raise ValueError('Unsupported filter_arg parameter')
 
                 # TODO: Check if these bad images are in collection 2
                 # Time filters are to remove bad (L5) and pre-op (L8) images
@@ -287,7 +313,7 @@ class Collection():
                         'system:time_start', ee.Date('2011-12-31').millis()))
                 elif 'LC08' in coll_id:
                     input_coll = input_coll.filter(ee.Filter.gt(
-                        'system:time_start', ee.Date('2013-03-24').millis()))
+                        'system:time_start', ee.Date('2013-04-01').millis()))
 
                 def compute_lsr(image):
                     model_obj = Image.from_landsat_c2_sr(
@@ -306,9 +332,19 @@ class Collection():
                                     self.cloud_cover_max)\
                     .filterMetadata('CLOUD_COVER_LAND', 'greater_than', -0.5)
 
-                # TODO: Need to come up with a system for applying
-                #   generic filter arguments to the collections
-                if coll_id in self.filter_args.keys():
+                 # TODO: Move this to a separate function (maybe in utils.py?)
+                #   since  it is identical for all the supported collections
+                if (self.filter_args is None or
+                        not isinstance(self.filter_args, list) or
+                        coll_id not in self.filter_args.keys()):
+                    pass
+                elif isinstance(self.filter_args[coll_id], ee.ComputedObject):
+                    input_coll = input_coll.filter(self.filter_args[coll_id])
+                elif isinstance(self.filter_args[coll_id], list):
+                    # TODO: This generic dictionary based filtering should
+                    #   probably be removed since only the "equals" filter
+                    #   has been implemented and the functionality is better
+                    #   handled with the other two options.
                     for f in copy.deepcopy(self.filter_args[coll_id]):
                         try:
                             filter_type = f.pop('type')
@@ -316,6 +352,8 @@ class Collection():
                             continue
                         if filter_type.lower() == 'equals':
                             input_coll = input_coll.filter(ee.Filter.equals(**f))
+                else:
+                    raise ValueError('Unsupported filter_arg parameter')
 
                 # TODO: Check if these bad images are in collection 1 SR
                 # Time filters are to remove bad (L5) and pre-op (L8) images
@@ -324,7 +362,7 @@ class Collection():
                         'system:time_start', ee.Date('2011-12-31').millis()))
                 elif 'LC08' in coll_id:
                     input_coll = input_coll.filter(ee.Filter.gt(
-                        'system:time_start', ee.Date('2013-03-24').millis()))
+                        'system:time_start', ee.Date('2013-04-01').millis()))
 
                 def compute_ltoa(image):
                     model_obj = Image.from_landsat_c1_toa(
@@ -342,9 +380,19 @@ class Collection():
                                     self.cloud_cover_max)\
                     .filterMetadata('CLOUD_COVER_LAND', 'greater_than', -0.5)
 
-                # TODO: Need to come up with a system for applying
-                #   generic filter arguments to the collections
-                if coll_id in self.filter_args.keys():
+                # TODO: Move this to a separate function (maybe in utils.py?)
+                #   since  it is identical for all the supported collections
+                if (self.filter_args is None or
+                        not isinstance(self.filter_args, dict) or
+                        coll_id not in self.filter_args.keys()):
+                    pass
+                elif isinstance(self.filter_args[coll_id], ee.ComputedObject):
+                    input_coll = input_coll.filter(self.filter_args[coll_id])
+                elif isinstance(self.filter_args[coll_id], list):
+                    # TODO: This generic dictionary based filtering should
+                    #   probably be removed since only the "equals" filter
+                    #   has been implemented and the functionality is better
+                    #   handled with the other two options.
                     for f in copy.deepcopy(self.filter_args[coll_id]):
                         try:
                             filter_type = f.pop('type')
@@ -352,6 +400,8 @@ class Collection():
                             continue
                         if filter_type.lower() == 'equals':
                             input_coll = input_coll.filter(ee.Filter.equals(**f))
+                else:
+                    raise ValueError('Unsupported filter_arg parameter')
 
                 # Time filters are to remove bad (L5) and pre-op (L8) images
                 if 'LT05' in coll_id:
@@ -359,7 +409,7 @@ class Collection():
                         'system:time_start', ee.Date('2011-12-31').millis()))
                 elif 'LC08' in coll_id:
                     input_coll = input_coll.filter(ee.Filter.gt(
-                        'system:time_start', ee.Date('2013-03-24').millis()))
+                        'system:time_start', ee.Date('2013-04-01').millis()))
 
                 def compute_lsr(image):
                     model_obj = Image.from_landsat_c1_sr(
@@ -502,6 +552,9 @@ class Collection():
         if ('et_reference_resample' in kwargs.keys() and \
                 kwargs['et_reference_resample'] is not None):
             self.model_args['et_reference_resample'] = kwargs['et_reference_resample']
+        if ('et_reference_date_type' in kwargs.keys() and \
+                kwargs['et_reference_date_type'] is not None):
+            self.model_args['et_reference_date_type'] = kwargs['et_reference_date_type']
 
         # Check that all reference ET parameters were set
         # print(self.model_args)
@@ -515,14 +568,35 @@ class Collection():
         if type(self.model_args['et_reference_source']) is str:
             # Assume a string source is an single image collection ID
             #   not an list of collection IDs or ee.ImageCollection
-            daily_et_ref_coll_id = self.model_args['et_reference_source']
-            daily_et_ref_coll = ee.ImageCollection(daily_et_ref_coll_id)\
-                .filterDate(start_date, end_date)\
-                .select([self.model_args['et_reference_band']], ['et_reference'])
+            if ('et_reference_date_type' not in self.model_args.keys() or
+                    self.model_args['et_reference_date_type'] is None or
+                    self.model_args['et_reference_date_type'].lower() == 'daily'):
+                daily_et_ref_coll = ee.ImageCollection(self.model_args['et_reference_source'])\
+                    .filterDate(start_date, end_date)\
+                    .select([self.model_args['et_reference_band']], ['et_reference'])
+            elif self.model_args['et_reference_date_type'].lower() == 'doy':
+                # Assume the image collection is a climatology with a "DOY" property
+                def doy_image(input_img):
+                    """Return the doy-based reference et with daily time properties from GRIDMET"""
+                    image_date = ee.Algorithms.Date(input_img.get('system:time_start'))
+                    image_doy = ee.Number(image_date.getRelative('day', 'year')).add(1).int()
+                    doy_coll = ee.ImageCollection(self.model_args['et_reference_source'])\
+                        .filterMetadata('DOY', 'equals', image_doy)\
+                        .select([self.model_args['et_reference_band']], ['et_reference'])
+                    # CGM - Was there a reason to use rangeContains if limiting to one DOY?
+                    #     .filter(ee.Filter.rangeContains('DOY', image_doy, image_doy))\
+                    return ee.Image(doy_coll.first())\
+                        .set({'system:index': input_img.get('system:index'),
+                              'system:time_start': input_img.get('system:time_start')})
+                # Note, the collection and band that are used are important as
+                #   long as they are daily and available for the time period
+                daily_et_ref_coll = ee.ImageCollection('IDAHO_EPSCOR/GRIDMET')\
+                    .filterDate(start_date, end_date).select(['eto'])\
+                    .map(doy_image)
         # elif isinstance(self.model_args['et_reference_source'], computedobject.ComputedObject):
         #     # Interpret computed objects as image collections
-        #     daily_et_ref_coll = self.model_args['et_reference_source'] \
-        #         .filterDate(self.start_date, self.end_date) \
+        #     daily_et_ref_coll = self.model_args['et_reference_source']\
+        #         .filterDate(self.start_date, self.end_date)\
         #         .select([self.model_args['et_reference_band']])
         else:
             raise ValueError('unsupported et_reference_source: {}'.format(

@@ -31,7 +31,10 @@ default_coll_args = {
     'et_reference_band': 'etr',
     'et_reference_factor': 0.85,
     'et_reference_resample': 'nearest',
-    'model_args': {},
+    'et_reference_date_type': None,
+    # 'et_reference_date_type': 'daily',
+    'model_args': {'tcorr_source': 0.99},
+    # 'model_args': {},
     'filter_args': {},
 }
 
@@ -55,6 +58,7 @@ def test_Collection_init_default_parameters():
     del args['et_reference_band']
     del args['et_reference_factor']
     del args['et_reference_resample']
+    del args['et_reference_date_type']
     del args['variables']
 
     m = ssebop.Collection(**args)
@@ -63,8 +67,9 @@ def test_Collection_init_default_parameters():
     assert m.et_reference_band == None
     assert m.et_reference_factor == None
     assert m.et_reference_resample == None
+    assert m.et_reference_date_type == None
     assert m.cloud_cover_max == 70
-    assert m.model_args == {}
+    assert m.model_args == {'tcorr_source': 0.99}
     assert m.filter_args == {}
     assert set(m._interp_vars) == {'ndvi', 'et_fraction'}
 
@@ -239,7 +244,7 @@ def test_Collection_build_filter_dates_lc08():
     # assert parse_scene_id(output) == []
 
 
-def test_Collection_build_filter_args():
+def test_Collection_build_filter_args_keyword():
     # Need to test with two collections to catch bug when deepcopy isn't used
     collections = ['LANDSAT/LC08/C01/T1_SR', 'LANDSAT/LE07/C01/T1_SR']
     wrs2_filter = [
@@ -251,6 +256,36 @@ def test_Collection_build_filter_args():
         filter_args={c: wrs2_filter for c in collections})
     output = utils.getinfo(coll_obj._build(variables=['et']))
     assert {x[5:11] for x in parse_scene_id(output)} == {'044033'}
+
+
+def test_Collection_build_filter_args_eeobject():
+    # Need to test with two collections to catch bug when deepcopy isn't used
+    collections = ['LANDSAT/LC08/C01/T1_SR', 'LANDSAT/LE07/C01/T1_SR']
+    wrs2_filter = ee.Filter.And(ee.Filter.equals('WRS_PATH', 44),
+                                ee.Filter.equals('WRS_ROW', 33))
+    coll_obj = default_coll_obj(
+        collections=collections,
+        geometry=ee.Geometry.Rectangle(-125, 35, -120, 40),
+        filter_args={c: wrs2_filter for c in collections})
+    output = utils.getinfo(coll_obj._build(variables=['et']))
+    assert {x[5:11] for x in parse_scene_id(output)} == {'044033'}
+
+
+# CGM - This argument is hard to differentiate from the generic keyword based
+#   filter args (see test above) and is not that different than just building
+#   a single composite filter, so it is not being supported for now.
+# def test_Collection_build_filter_args_list():
+#     # Need to test with two collections to catch bug when deepcopy isn't used
+#     collections = ['LANDSAT/LC08/C01/T1_SR', 'LANDSAT/LE07/C01/T1_SR']
+#     wrs2_filter = [ee.Filter.equals('WRS_PATH', 44),
+#                    ee.Filter.equals('WRS_ROW', 33)]
+#     coll_obj = default_coll_obj(
+#         collections=collections,
+#         geometry=ee.Geometry.Rectangle(-125, 35, -120, 40),
+#         filter_args={c: wrs2_filter for c in collections})
+#     output = utils.getinfo(coll_obj._build(variables=['et']))
+#     assert {x[5:11] for x in parse_scene_id(output)} == {'044033'}
+
 
 
 def test_Collection_build_invalid_variable_exception():
@@ -396,6 +431,13 @@ def test_Collection_interpolate_et_reference_resample_exception():
             et_reference_resample='deadbeef', model_args={}).interpolate())
 
 
+def test_Collection_interpolate_et_reference_date_type_exception():
+    """Test if Exception is raised if et_reference_factor is not a number or negative"""
+    with pytest.raises(ValueError):
+        utils.getinfo(default_coll_obj(
+            et_reference_date_type='deadbeef', model_args={}).interpolate())
+
+
 def test_Collection_interpolate_et_reference_params_kwargs():
     """Test setting et_reference parameters in the Collection init args"""
     output = utils.getinfo(default_coll_obj(
@@ -480,3 +522,33 @@ def test_Collection_interpolate_only_interpolate_images():
         start_date='2017-04-01', end_date='2017-04-30',
         variables=list(variables), cloud_cover_max=70).interpolate())
     assert {y['id'] for x in output['features'] for y in x['bands']} == variables
+
+
+def test_Collection_interpolate_daily_et_reference_date_type_doy(tol=0.01):
+    """Test interpolating a daily collection using a reference ET climatology"""
+    output_coll = default_coll_obj(
+        collections=['LANDSAT/LC08/C02/T1_L2'],
+        geometry=ee.Geometry.Point(TEST_POINT),
+        start_date=START_DATE, end_date=END_DATE,
+        variables=['et_reference'],
+        et_reference_source='projects/usgs-ssebop/pet/gridmet_median_v1',
+        et_reference_band='etr', et_reference_factor=1.0,
+        et_reference_resample='nearest', et_reference_date_type='doy',
+        ).interpolate(t_interval='daily')
+    output = utils.point_coll_value(output_coll, TEST_POINT, scale=10)
+    assert abs(output['et_reference'][START_DATE] - 8.75) <= tol
+
+
+def test_Collection_interpolate_monthly_et_reference_date_type_doy(tol=0.01):
+    """Test interpolating a monthly collection using a reference ET climatology"""
+    output_coll = default_coll_obj(
+        collections=['LANDSAT/LC08/C02/T1_L2'],
+        geometry=ee.Geometry.Point(TEST_POINT),
+        start_date=START_DATE, end_date=END_DATE,
+        variables=['et_reference'],
+        et_reference_source='projects/usgs-ssebop/pet/gridmet_median_v1',
+        et_reference_band='etr', et_reference_factor=1.0,
+        et_reference_resample='nearest', et_reference_date_type='doy',
+        ).interpolate(t_interval='monthly')
+    output = utils.point_coll_value(output_coll, TEST_POINT, scale=10)
+    assert abs(output['et_reference'][START_DATE] - 291.56) <= tol

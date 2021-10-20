@@ -202,6 +202,18 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
     except Exception as e:
         raise e
 
+    try:
+        fill_with_climo_flag = str(ini['EXPORT']['fill_with_climo'])
+        if fill_with_climo_flag.lower() in ['t', 'true']:
+            fill_with_climo_flag = True
+        else:
+            fill_with_climo_flag = False
+    except KeyError:
+        fill_with_climo_flag = False
+        logging.debug('  fill_with_climo: not set in INI, defaulting to False')
+    except Exception as e:
+        raise e
+
     # TODO: Add try/except blocks and default values?
     cloud_cover = float(ini['INPUTS']['cloud_cover'])
 
@@ -213,22 +225,26 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
     filter_args = {}
 
     # TODO: Add try/except blocks
-    tmax_name = ini[model_name]['tmax_source']
+    tmax_source = ini[model_name]['tmax_source']
     tcorr_source = ini[model_name]['tcorr_source']
 
-    tcorr_scene_coll_id = '{}/{}_scene'.format(
-        ini['EXPORT']['export_coll'], tmax_name.lower())
+    tcorr_scene_coll_id = '{}'.format(ini['EXPORT']['export_coll'])
+    # tcorr_scene_coll_id = '{}/{}_scene'.format(
+    #     ini['EXPORT']['export_coll'], tmax_source.lower())
+    tcorr_month_coll_id = f'{tcorr_scene_coll_id}_monthly'
 
     if tcorr_source.upper() not in ['GRIDDED_COLD', 'GRIDDED']:
         raise ValueError('unsupported tcorr_source for these tools')
 
     # For now only support reading specific Tmax sources
-    if tmax_name.upper() not in ['DAYMET_MEDIAN_V2']:
-        raise ValueError(f'unsupported tmax_source: {tmax_name}')
-    # if (tmax_name.upper() == 'CIMIS' and
+    if (tmax_source.upper() not in ['DAYMET_MEDIAN_V2'] and
+            not re.match('^projects/.+/tmax/.+_(mean|median)_\d{4}_\d{4}(_\w+)?',
+                         tmax_source)):
+        raise ValueError(f'unsupported tmax_source: {tmax_source}')
+    # if (tmax_source.upper() == 'CIMIS' and
     #         ini['INPUTS']['end_date'] < '2003-10-01'):
     #     raise ValueError('CIMIS is not currently available before 2003-10-01')
-    # elif (tmax_name.upper() == 'DAYMET' and
+    # elif (tmax_source.upper() == 'DAYMET' and
     #         ini['INPUTS']['end_date'] > '2018-12-31'):
     #     logging.warning('\nDAYMET is not currently available past 2018-12-31, '
     #                     'using median Tmax values\n')
@@ -293,10 +309,7 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
 
 
     logging.debug('\nTmax properties')
-    tmax_source = tmax_name.split('_', 1)[0]
-    tmax_version = tmax_name.split('_', 1)[1]
     logging.debug(f'  Source:  {tmax_source}')
-    logging.debug(f'  Version: {tmax_version}')
     # # DEADBEEF - Not needed with gridded Tcorr
     # # Get a Tmax image to set the Tcorr values to
     # if 'MEDIAN' in tmax_name.upper():
@@ -436,7 +449,7 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
             logging.debug(f'  Date: {export_date}')
 
             export_id = export_id_fmt.format(
-                product=tmax_name.lower(), scene_id=scene_id)
+                product=tmax_source.split('/')[-1].lower(), scene_id=scene_id)
             logging.debug(f'  Export ID: {export_id}')
 
             asset_id = asset_id_fmt.format(
@@ -490,10 +503,10 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
                     ee.data.deleteAsset(asset_id)
             else:
                 if export_id in tasks.keys():
-                    logging.debug('  Task already submitted, exiting')
+                    logging.info('  Task already submitted, skipping')
                     continue
                 elif asset_props and asset_id in asset_props.keys():
-                    logging.debug('  Asset already exists, skipping')
+                    logging.info('  Asset already exists, skipping')
                     continue
 
             # Get the input image grid and spatial reference
@@ -558,6 +571,35 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
                 tcorr_img = t_obj.tcorr_gridded_cold
             # tcorr_img = t_obj.tcorr
 
+            # Properties that the climo tcorr image might change need to be set
+            #   before the climo is used
+            # It would probably make more sense to move all of the property
+            #   setting to right here instead of down below
+            tcorr_img = tcorr_img.set({
+                'tcorr_index': TCORR_INDICES[tcorr_source.upper()],
+            })
+
+            # Replace masked tcorr images with climos
+            # Note, If the month climo doesn't exist this will keep the
+            #   existing masked Tcorr image (we may want to change that)
+            # Does the tcorr_coarse count need to be set to a value like 0?
+            if fill_with_climo_flag and tcorr_source == 'GRIDDED_COLD':
+                logging.debug('    Checking if monthly climo should be applied')
+                tcorr_month_coll = ee.ImageCollection(tcorr_month_coll_id)\
+                    .filterMetadata('wrs2_tile', 'equals', wrs2_tile)\
+                    .filterMetadata('month', 'equals', export_dt.month)\
+                    .select(['tcorr'])
+                # Setting the quality to 0 here causes it to get masked below
+                #   We might want to have it actually be 0 instead
+                tcorr_month_img = tcorr_month_coll.first()\
+                    .addBands([tcorr_month_coll.first().multiply(0).rename(['quality'])])\
+                    .set({'tcorr_coarse_count': None})
+                tcorr_img = ee.Algorithms.If(
+                    ee.Number(tcorr_img.get('tcorr_coarse_count')).eq(0)
+                        .And(tcorr_month_coll.size().gt(0)),
+                    tcorr_month_img,
+                    tcorr_img)
+
             # Clip to the Landsat image footprint
             tcorr_img = ee.Image(tcorr_img).clip(ee.Image(image_id).geometry())
             # Clear the transparency mask (from clipping)
@@ -586,10 +628,11 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
                     'realtime': 'true' if '/T1_RT' in coll_id else 'false',
                     'scene_id': scene_id,
                     'system:time_start': image_info['properties']['system:time_start'],
-                    'tcorr_index': TCORR_INDICES[tcorr_source.upper()],
-                    'tcorr_source': tcorr_source.upper(),
-                    'tmax_source': tmax_source.upper(),
-                    'tmax_version': tmax_version.upper(),
+                    # 'tcorr_index': TCORR_INDICES[tcorr_source.upper()],
+                    'tcorr_source': tcorr_source,
+                    'tmax_source': tmax_source,
+                    # 'tmax_source': tmax_source.replace(
+                    #     'projects/earthengine-legacy/assets/', ''),
                     'tool_name': TOOL_NAME,
                     'tool_version': TOOL_VERSION,
                     'wrs2_path': wrs2_path,

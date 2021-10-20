@@ -3,8 +3,7 @@ import math
 import ee
 
 
-def et_fraction(lst, tmax, tcorr, dt, elr_flag=False,
-                elev=None):
+def et_fraction(lst, tmax, tcorr, dt):
     """SSEBop fraction of reference ET (ETf)
 
     Parameters
@@ -17,11 +16,6 @@ def et_fraction(lst, tmax, tcorr, dt, elr_flag=False,
         Tcorr.
     dt : ee.Image, ee.Number
         Temperature difference [K].
-    elr_flag : bool, optional
-        If True, apply Elevation Lapse Rate (ELR) adjustment
-        (the default is False).
-    elev : ee.Image, ee.Number, optional
-        Elevation [m] (the default is None).  Only needed if elr_flag is True.
 
     Returns
     -------
@@ -31,18 +25,18 @@ def et_fraction(lst, tmax, tcorr, dt, elr_flag=False,
     ----------
 
 
-    """
-    # Adjust air temperature based on elevation (Elevation Lapse Rate)
-    if elr_flag:
-        tmax = ee.Image(lapse_adjust(tmax, ee.Image(elev)))
+    Notes
+    -----
+    Clamping function assumes this is an alfalfa fraction.
 
+    """
     et_fraction = lst.expression(
         '(lst * (-1) + tmax * tcorr + dt) / dt',
         {'tmax': tmax, 'dt': dt, 'lst': lst, 'tcorr': tcorr})
 
     return et_fraction\
-        .updateMask(et_fraction.lt(1.5))\
-        .clamp(0, 1.05)\
+        .updateMask(et_fraction.lte(2.0))\
+        .clamp(0, 1.0)\
         .rename(['et_fraction'])
 
 
@@ -175,3 +169,58 @@ def lapse_adjust(temperature, elev, lapse_threshold=1500):
             'threshold': lapse_threshold
         })
     return ee.Image(temperature).where(elev.gt(lapse_threshold), elr_adjust)
+
+
+def elr_adjust(temperature, elevation, radius=80):
+    """Elevation Lapse Rate (ELR) adjusted temperature [K]
+
+    Parameters
+    ----------
+    temperature : ee.Image
+        Air temperature [K].
+    elevation : ee.Image
+        Elevation [m].
+    radius : int
+        Smoothing radius (the default is 80)
+
+    Returns
+    -------
+    ee.Image of adjusted temperature
+
+    Notes
+    -----
+    The radius was selected for the DAYMET 1km grid and will likely need to be
+    adjusted for other temperature datasets.
+
+    """
+    tmax_img = ee.Image(temperature)
+    elev_img = ee.Image(elevation)
+
+    tmax_projection = tmax_img.projection()
+
+    # First resample the elevation data to the temperature grid
+    # These approaches for resampling should all be really similar
+    #   but simple resampling is probably the fastest
+    elev_tmax_fine = elev_img.reproject(crs=tmax_projection)
+    # elev_tmax_fine = elev_img.resample('bilinear').reproject(crs=tmax_projection)
+    # elev_tmax_fine = elev_img\
+    #     .reduceResolution(reducer=ee.Reducer.median(), maxPixels=65536)\
+    #     .reproject(crs=tmax_projection)
+
+    # Then generate the smoothed elevation image
+    elev_tmax_smoothed = elev_tmax_fine\
+        .reduceNeighborhood(reducer=ee.Reducer.median(),
+                            kernel=ee.Kernel.square(radius=radius,
+                                                    units='pixels'))\
+        .reproject(crs=tmax_projection)
+
+    # Final ELR mask: (DEM-(medDEM.add(100)).gt(0))
+    elev_diff = elev_tmax_fine.subtract(elev_tmax_smoothed.add(100))
+    elr_mask = elev_diff.gt(0)
+
+    # temperature - (0.005 * (elr_layer))
+    elr_adjust = tmax_img.subtract(elev_diff.multiply(0.005))
+
+    tmax_img = tmax_img.where(elr_mask, elr_adjust)
+
+    return tmax_img
