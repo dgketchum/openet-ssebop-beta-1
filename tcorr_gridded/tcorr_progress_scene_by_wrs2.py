@@ -13,11 +13,11 @@ import time
 import ee
 
 import openet.ssebop as ssebop
+print('running ssebop version: {}'.format(ssebop.__version__))
 import openet.core
 import openet.core.utils as utils
 
 TOOL_NAME = 'tcorr_export_scene_by_wrs2'
-TOOL_VERSION = '0.1.6'
 
 # TODO: This could be a property or method of SSEBop or the Image class
 TCORR_INDICES = {
@@ -370,6 +370,7 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
 
     # Process each WRS2 tile separately
     exists_ct, not_done_ct, submitted_ct, to_update_ct = 0, 0, 0, 0
+    growing_season = 0
     logging.info('\nImage Exports')
     for wrs2_i, wrs2_tile in enumerate(wrs2_tile_list):
         wrs2_path, wrs2_row = map(int, wrs2_tile_re.findall(wrs2_tile)[0])
@@ -424,8 +425,13 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
         for image_id in image_id_list:
             coll_id, scene_id = image_id.rsplit('/', 1)
             # logging.info(f'{scene_id}')
-
+            
             export_dt = datetime.datetime.strptime(scene_id.split('_')[-1], '%Y%m%d')
+            valid_start = datetime.datetime(export_dt.year, 4, 1) - datetime.timedelta(days=48)
+            valid_end = datetime.datetime(export_dt.year, 10, 31) + datetime.timedelta(days=48)
+            if valid_start < export_dt < valid_end:
+                growing_season += 1    
+            
             export_date = export_dt.strftime('%Y-%m-%d')
             logging.debug(f'  Date: {export_date}')
 
@@ -448,7 +454,8 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
                     continue
                 # In update mode only overwrite if the version is old
                 if asset_props and asset_id in asset_props.keys():
-                    model_ver = version_number(ssebop.__version__)
+                    # model_ver = version_number(ssebop.__version__)
+                    model_ver = version_number('0.2.0')
                     asset_ver = version_number(
                         asset_props[asset_id]['model_version'])
 
@@ -505,8 +512,9 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
         not_done_ct += len(not_done)
         submitted_ct += len(submitted)
         to_update_ct += len(to_update)
-        logging.info('wrs2_tile {} exist, {} not done, {} submitted, {} to update'.format(len(exists), len(not_done),
+        logging.info('          {} exist, {} not done, {} submitted, {} to update'.format(len(exists), len(not_done),
                                                                                           len(submitted), len(to_update)))
+        logging.info('          {} growing season'.format(growing_season))
 
     logging.info('overall {} exist, {} not done, {} submitted, {} to update'.format(exists_ct, not_done_ct,
                                                                                       submitted_ct, to_update_ct))

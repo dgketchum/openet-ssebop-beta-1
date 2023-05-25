@@ -1,4 +1,5 @@
 import argparse
+from argparse import Namespace
 from builtins import input
 import configparser
 import datetime
@@ -12,6 +13,8 @@ import time
 import ee
 
 import openet.ssebop as ssebop
+print('SSEBop Version: {}'.format(ssebop.__version__))
+
 import openet.core
 import openet.core.utils as utils
 
@@ -85,17 +88,17 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
         # 'p047r031', # North California coast
         'p042r037',  # San Nicholas Island, California
         # 'p041r037', # South California coast
-        'p040r038', 'p039r038', 'p038r038', # Mexico (by California)
-        'p037r039', 'p036r039', 'p035r039', # Mexico (by Arizona)
-        'p034r039', 'p033r039', # Mexico (by New Mexico)
+        'p040r038', 'p039r038', 'p038r038',  # Mexico (by California)
+        'p037r039', 'p036r039', 'p035r039',  # Mexico (by Arizona)
+        'p034r039', 'p033r039',  # Mexico (by New Mexico)
         'p032r040',  # Mexico (West Texas)
         'p029r041', 'p028r042', 'p027r043', 'p026r043',  # Mexico (South Texas)
-        'p019r040', 'p018r040', # West Florida coast
-        'p016r043', 'p015r043', # South Florida coast
-        'p014r041', 'p014r042', 'p014r043', # East Florida coast
-        'p013r035', 'p013r036', # North Carolina Outer Banks
-        'p013r026', 'p012r026', # Canada (by Maine)
-        'p011r032', # Rhode Island coast
+        'p019r040', 'p018r040',  # West Florida coast
+        'p016r043', 'p015r043',  # South Florida coast
+        'p014r041', 'p014r042', 'p014r043',  # East Florida coast
+        'p013r035', 'p013r036',  # North Carolina Outer Banks
+        'p013r026', 'p012r026',  # Canada (by Maine)
+        'p011r032',  # Rhode Island coast
     ]
     wrs2_path_skip_list = [9, 49]
     wrs2_row_skip_list = [25, 24, 43]
@@ -171,7 +174,7 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
         raise e
 
     try:
-        wrs2_tiles = str(ini['INPUTS']['wrs2_tiles'])\
+        wrs2_tiles = str(ini['INPUTS']['wrs2_tiles']) \
             .replace('"', '').replace("'", '')
         wrs2_tiles = sorted([x.strip() for x in wrs2_tiles.split(',')])
     except KeyError:
@@ -202,18 +205,6 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
     except Exception as e:
         raise e
 
-    try:
-        fill_with_climo_flag = str(ini['EXPORT']['fill_with_climo'])
-        if fill_with_climo_flag.lower() in ['t', 'true']:
-            fill_with_climo_flag = True
-        else:
-            fill_with_climo_flag = False
-    except KeyError:
-        fill_with_climo_flag = False
-        logging.debug('  fill_with_climo: not set in INI, defaulting to False')
-    except Exception as e:
-        raise e
-
     # TODO: Add try/except blocks and default values?
     cloud_cover = float(ini['INPUTS']['cloud_cover'])
 
@@ -225,30 +216,25 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
     filter_args = {}
 
     # TODO: Add try/except blocks
-    tmax_source = ini[model_name]['tmax_source']
+    tmax_name = ini[model_name]['tmax_source']
     tcorr_source = ini[model_name]['tcorr_source']
 
-    tcorr_scene_coll_id = '{}'.format(ini['EXPORT']['export_coll'])
-    # tcorr_scene_coll_id = '{}/{}_scene'.format(
-    #     ini['EXPORT']['export_coll'], tmax_source.lower())
-    tcorr_month_coll_id = f'{tcorr_scene_coll_id}_monthly'
+    tcorr_scene_coll_id = '{}/{}_scene'.format(
+        ini['EXPORT']['export_coll'], tmax_name.lower())
 
     if tcorr_source.upper() not in ['GRIDDED_COLD', 'GRIDDED']:
         raise ValueError('unsupported tcorr_source for these tools')
 
     # For now only support reading specific Tmax sources
-    if (tmax_source.upper() not in ['DAYMET_MEDIAN_V2'] and
-            not re.match('^projects/.+/tmax/.+_(mean|median)_\d{4}_\d{4}(_\w+)?',
-                         tmax_source)):
-        raise ValueError(f'unsupported tmax_source: {tmax_source}')
-    # if (tmax_source.upper() == 'CIMIS' and
+    if tmax_name.upper() not in ['DAYMET_MEDIAN_V2']:
+        raise ValueError(f'unsupported tmax_source: {tmax_name}')
+    # if (tmax_name.upper() == 'CIMIS' and
     #         ini['INPUTS']['end_date'] < '2003-10-01'):
     #     raise ValueError('CIMIS is not currently available before 2003-10-01')
-    # elif (tmax_source.upper() == 'DAYMET' and
+    # elif (tmax_name.upper() == 'DAYMET' and
     #         ini['INPUTS']['end_date'] > '2018-12-31'):
     #     logging.warning('\nDAYMET is not currently available past 2018-12-31, '
     #                     'using median Tmax values\n')
-
 
     # If the user set the tiles argument, use these instead of the INI values
     if tiles:
@@ -298,18 +284,22 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
     # logging.debug('  Start: {}'.format(iter_start_dt.strftime('%Y-%m-%d')))
     # logging.debug('  End:   {}'.format(iter_end_dt.strftime('%Y-%m-%d')))
 
-
     logging.info('\nInitializing Earth Engine')
-    if gee_key_file:
-        logging.info(f'  Using service account key file: {gee_key_file}')
-        # The "EE_ACCOUNT" parameter is not used if the key file is valid
-        ee.Initialize(ee.ServiceAccountCredentials('x', key_file=gee_key_file))
-    else:
-        ee.Initialize()
-
+    import google.auth
+    cred, proj = google.auth.default()
+    ee.Initialize(cred)
+    # if gee_key_file:
+    #     logging.info(f'  Using service account key file: {gee_key_file}')
+    #     # The "EE_ACCOUNT" parameter is not used if the key file is valid
+    #     ee.Initialize(ee.ServiceAccountCredentials('x', key_file=gee_key_file))
+    # else:
+    #     ee.Initialize()
 
     logging.debug('\nTmax properties')
+    tmax_source = tmax_name.split('_', 1)[0]
+    tmax_version = tmax_name.split('_', 1)[1]
     logging.debug(f'  Source:  {tmax_source}')
+    logging.debug(f'  Version: {tmax_version}')
     # # DEADBEEF - Not needed with gridded Tcorr
     # # Get a Tmax image to set the Tcorr values to
     # if 'MEDIAN' in tmax_name.upper():
@@ -320,7 +310,6 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
     # # else:
     # #     raise ValueError(f'unsupported tmax_source: {tmax_name}')
     # logging.debug(f'  Collection: {tmax_coll_id}')
-
 
     # Build output collection and folder if necessary
     logging.debug(f'\nExport Collection: {tcorr_scene_coll_id}')
@@ -335,7 +324,6 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
         input('Press ENTER to continue')
         ee.data.createAsset({'type': 'IMAGE_COLLECTION'}, tcorr_scene_coll_id)
 
-
     # Get current running tasks
     tasks = utils.get_ee_tasks()
     ready_task_count = sum(1 for t in tasks.values() if t['state'] == 'READY')
@@ -344,14 +332,12 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
         utils.print_ee_tasks(tasks)
         input('ENTER')
 
-
     # DEADBEEF - The asset list will be retrieved before each WRS2 tile is processed
     # Get current asset list
     # logging.debug('\nGetting GEE asset list')
     # asset_list = utils.get_ee_assets(tcorr_scene_coll_id)
     # if logging.getLogger().getEffectiveLevel() == logging.DEBUG:
     #     pprint.pprint(asset_list[:10])
-
 
     # Get list of MGRS tiles that intersect the study area
     logging.debug('\nMGRS Tiles/Zones')
@@ -371,7 +357,6 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
     # pprint.pprint(export_list)
     # input('ENTER')
 
-
     # Build the complete/filtered WRS2 list
     wrs2_tile_list = list(set(
         wrs2 for tile_info in export_list
@@ -385,9 +370,8 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
     if wrs2_row_skip_list:
         wrs2_tile_list = [wrs2 for wrs2 in wrs2_tile_list
                           if int(wrs2[5:8]) not in wrs2_row_skip_list]
-    wrs2_tile_list = sorted(wrs2_tile_list, reverse=not(reverse_flag))
+    wrs2_tile_list = sorted(wrs2_tile_list, reverse=not reverse_flag)
     wrs2_tile_count = len(wrs2_tile_list)
-
 
     # Process each WRS2 tile separately
     logging.info('\nImage Exports')
@@ -449,7 +433,7 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
             logging.debug(f'  Date: {export_date}')
 
             export_id = export_id_fmt.format(
-                product=tmax_source.split('/')[-1].lower(), scene_id=scene_id)
+                product=tmax_name.lower(), scene_id=scene_id)
             logging.debug(f'  Export ID: {export_id}')
 
             asset_id = asset_id_fmt.format(
@@ -467,8 +451,7 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
                 # In update mode only overwrite if the version is old
                 if asset_props and asset_id in asset_props.keys():
                     model_ver = version_number(ssebop.__version__)
-                    asset_ver = version_number(
-                        asset_props[asset_id]['model_version'])
+                    asset_ver = version_number(asset_props[asset_id]['model_version'])
 
                     if asset_ver < model_ver:
                         logging.info('  Existing asset model version is old, '
@@ -481,14 +464,14 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
                             logging.info('  Error removing asset, skipping')
                             continue
                     elif (('T1_RT_TOA' in asset_props[asset_id]['coll_id']) and
-                               ('T1_RT_TOA' not in image_id)):
-                            logging.info('  Existing asset is from realtime '
-                                         'Landsat collection, removing')
-                            try:
-                                ee.data.deleteAsset(asset_id)
-                            except:
-                                logging.info('  Error removing asset, skipping')
-                                continue
+                          ('T1_RT_TOA' not in image_id)):
+                        logging.info('  Existing asset is from realtime '
+                                     'Landsat collection, removing')
+                        try:
+                            ee.data.deleteAsset(asset_id)
+                        except:
+                            logging.info('  Error removing asset, skipping')
+                            continue
                     else:
                         logging.debug('  Asset is up to date, skipping')
                         continue
@@ -503,10 +486,10 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
                     ee.data.deleteAsset(asset_id)
             else:
                 if export_id in tasks.keys():
-                    logging.info('  Task already submitted, skipping')
+                    logging.debug('  Task already submitted, exiting')
                     continue
                 elif asset_props and asset_id in asset_props.keys():
-                    logging.info('  Asset already exists, skipping')
+                    logging.debug('  Asset already exists, skipping')
                     continue
 
             # Get the input image grid and spatial reference
@@ -517,7 +500,7 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
             # Transform format: [30, 0, 591285, 0, -30, 4256115]
             image_extent = [
                 image_geo[2], image_geo[5] + image_shape[1] * image_geo[4],
-                image_geo[2] + image_shape[0] * image_geo[0], image_geo[5]]
+                              image_geo[2] + image_shape[0] * image_geo[0], image_geo[5]]
             logging.debug(f'    Image CRS: {image_crs}')
             logging.debug(f'    Image Geo: {image_geo}')
             logging.debug(f'    Image Extent: {image_extent}')
@@ -571,77 +554,54 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
                 tcorr_img = t_obj.tcorr_gridded_cold
             # tcorr_img = t_obj.tcorr
 
-            # Properties that the climo tcorr image might change need to be set
-            #   before the climo is used
-            # It would probably make more sense to move all of the property
-            #   setting to right here instead of down below
-            tcorr_img = tcorr_img.set({
-                'tcorr_index': TCORR_INDICES[tcorr_source.upper()],
-            })
-
-            # Replace masked tcorr images with climos
-            # Note, If the month climo doesn't exist this will keep the
-            #   existing masked Tcorr image (we may want to change that)
-            # Does the tcorr_coarse count need to be set to a value like 0?
-            if fill_with_climo_flag and tcorr_source == 'GRIDDED_COLD':
-                logging.debug('    Checking if monthly climo should be applied')
-                tcorr_month_coll = ee.ImageCollection(tcorr_month_coll_id)\
-                    .filterMetadata('wrs2_tile', 'equals', wrs2_tile)\
-                    .filterMetadata('month', 'equals', export_dt.month)\
-                    .select(['tcorr'])
-                # Setting the quality to 0 here causes it to get masked below
-                #   We might want to have it actually be 0 instead
-                tcorr_month_img = tcorr_month_coll.first()\
-                    .addBands([tcorr_month_coll.first().multiply(0).rename(['quality'])])\
-                    .set({'tcorr_coarse_count': None})
-                tcorr_img = ee.Algorithms.If(
-                    ee.Number(tcorr_img.get('tcorr_coarse_count')).eq(0)
-                        .And(tcorr_month_coll.size().gt(0)),
-                    tcorr_month_img,
-                    tcorr_img)
-
             # Clip to the Landsat image footprint
             tcorr_img = ee.Image(tcorr_img).clip(ee.Image(image_id).geometry())
             # Clear the transparency mask (from clipping)
             tcorr_img = tcorr_img.updateMask(tcorr_img.unmask(0))
 
             if clip_ocean_flag:
-                tcorr_img = tcorr_img\
+                tcorr_img = tcorr_img \
                     .updateMask(ee.Image('projects/openet/ocean_mask'))
                 # # CGM - The NLCD mask will only work for CONUS
                 # output_img = output_img.updateMask(
                 #     ee.Image('USGS/NLCD/NLCD2016').select(['landcover']).mask())
 
-            tcorr_img = tcorr_img\
+            tcorr_img = tcorr_img \
                 .set({
-                    'CLOUD_COVER': image_info['properties']['CLOUD_COVER'],
-                    'CLOUD_COVER_LAND': image_info['properties']['CLOUD_COVER_LAND'],
-                    # 'SPACECRAFT_ID': image.get('SPACECRAFT_ID'),
-                    'coll_id': coll_id,
-                    'date_ingested': datetime.datetime.today().strftime('%Y-%m-%d'),
-                    'date': export_dt.strftime('%Y-%m-%d'),
-                    'doy': int(export_dt.strftime('%j')),
-                    'image_id': image_id,
-                    'model_name': model_name,
-                    'model_version': ssebop.__version__,
-                    'month': int(export_dt.month),
-                    'realtime': 'true' if '/T1_RT' in coll_id else 'false',
-                    'scene_id': scene_id,
-                    'system:time_start': image_info['properties']['system:time_start'],
-                    # 'tcorr_index': TCORR_INDICES[tcorr_source.upper()],
-                    'tcorr_source': tcorr_source,
-                    'tmax_source': tmax_source,
-                    # 'tmax_source': tmax_source.replace(
-                    #     'projects/earthengine-legacy/assets/', ''),
-                    'tool_name': TOOL_NAME,
-                    'tool_version': TOOL_VERSION,
-                    'wrs2_path': wrs2_path,
-                    'wrs2_row': wrs2_row,
-                    'wrs2_tile': wrs2_tile_fmt.format(wrs2_path, wrs2_row),
-                    'year': int(export_dt.year),
-                })
-            # pprint.pprint(output_img.getInfo()['properties'])
+                'CLOUD_COVER': image_info['properties']['CLOUD_COVER'],
+                'CLOUD_COVER_LAND': image_info['properties']['CLOUD_COVER_LAND'],
+                # 'SPACECRAFT_ID': image.get('SPACECRAFT_ID'),
+                'coll_id': coll_id,
+                'date_ingested': datetime.datetime.today().strftime('%Y-%m-%d'),
+                'date': export_dt.strftime('%Y-%m-%d'),
+                'doy': int(export_dt.strftime('%j')),
+                'image_id': image_id,
+                'model_name': model_name,
+                'model_version': ssebop.__version__,
+                'month': int(export_dt.month),
+                'realtime': 'true' if '/T1_RT' in coll_id else 'false',
+                'scene_id': scene_id,
+                'system:time_start': image_info['properties']['system:time_start'],
+                'tcorr_index': TCORR_INDICES[tcorr_source.upper()],
+                'tcorr_source': tcorr_source.upper(),
+                'tmax_source': tmax_source.upper(),
+                'tmax_version': tmax_version.upper(),
+                'tool_name': TOOL_NAME,
+                'tool_version': TOOL_VERSION,
+                'wrs2_path': wrs2_path,
+                'wrs2_row': wrs2_row,
+                'wrs2_tile': wrs2_tile_fmt.format(wrs2_path, wrs2_row),
+                'year': int(export_dt.year),
+            })
+            # pprint.pprint(tcorr_img.getInfo()['properties'])
             # input('ENTER')
+            
+            pr_props = 'p{}r{}'.format(str(wrs2_path).rjust(3, '0'), str(wrs2_row).rjust(3, '0'))
+            sid = scene_id.split('_')[1]
+            pr_image = 'p{}r{}'.format(sid[:3], sid[-3:])
+            
+            if pr_props != pr_image:
+                raise ValueError('Properties are misaligned')
 
             logging.debug('  Building export task')
             task = ee.batch.Export.image.toAsset(
@@ -657,13 +617,13 @@ def main(ini_path=None, overwrite_flag=False, delay_time=0, gee_key_file=None,
             utils.ee_task_start(task)
 
             ready_task_count += 1
-            # logging.debug(f'  Ready tasks: {ready_task_count}')
+            logging.debug(f'  Ready tasks: {ready_task_count}')
 
             # Pause before starting the next date (not export task)
             ready_task_count = delay_task(
                 delay_time=delay_time, task_max=ready_task_max,
                 task_count=ready_task_count)
-            # utils.delay_task(delay_time, max_ready)
+            utils.delay_task(delay_time, max_ready)
             # logging.debug('')
 
 
@@ -735,7 +695,6 @@ def delay_task(delay_time=0, task_max=-1, task_count=0):
             break
 
     return ready_task_count
-
 
 
 def mgrs_export_tiles(study_area_coll_id, mgrs_coll_id,
@@ -907,9 +866,13 @@ if __name__ == "__main__":
 
     logging.basicConfig(level=args.loglevel, format='%(message)s')
     logging.getLogger('googleapiclient').setLevel(logging.ERROR)
+    args = Namespace(delay=0, end=None,
+                     ini='/home/dgketchum/PycharmProjects/openet-ssebop-beta/tcorr_gridded/ini/tcorr_processing.ini',
+                     key=None, loglevel=20, overwrite=False, ready=1000, recent=0, reverse=False, start=None, tiles='',
+                     update=False)
 
     main(ini_path=args.ini, overwrite_flag=args.overwrite,
          delay_time=args.delay, gee_key_file=args.key, ready_task_max=args.ready,
          reverse_flag=args.reverse, tiles=args.tiles, update_flag=args.update,
          recent_days=args.recent, start_dt=args.start, end_dt=args.end,
-    )
+         )
